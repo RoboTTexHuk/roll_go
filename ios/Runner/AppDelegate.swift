@@ -19,14 +19,26 @@ import AppsFlyerLib
     static let fcmToken = "com.example.fcm/token"
     static let fcmNotification = "com.example.fcm/notification"
     static let fcmPushData = "com.example.fcm/push" // полный userInfo пуша
+    static let orientation = "com.example.orientation"
   }
-  
+
   // MARK: - Properties
   private var appMethodChannel: FlutterMethodChannel?
   private var fcmTokenChannel: FlutterMethodChannel?
   private var fcmNotificationChannel: FlutterMethodChannel?
   private var fcmPushDataChannel: FlutterMethodChannel?
   private var appsFlyerDeepLinkChannel: FlutterMethodChannel?
+  private var orientationChannel: FlutterMethodChannel?
+
+  // MARK: - Orientation lock (per-screen, iPhone + iPad)
+  //
+  // По умолчанию ничего не заблокировано — все экраны ведут себя как раньше
+  // (portrait + landscape, iPad поддерживает multitasking/Stage Manager).
+  // Когда Dart-сторона (SimpleWebViewPage2) сообщает через MethodChannel,
+  // что она открыта — форсим landscape именно для текущего окна и просим
+  // систему немедленно пересчитать ориентацию (iPad иначе игнорирует
+  // просто смену supportedInterfaceOrientations "на лету").
+  private var forceLandscapeOnly = false
   
   // MARK: - UIApplicationDelegate
   
@@ -54,7 +66,46 @@ import AppsFlyerLib
     
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
-  
+
+  // MARK: - Orientation lock override
+  //
+  // По умолчанию отдаём стандартный набор (совпадает с тем, что задано в Info.plist).
+  // Если forceLandscapeOnly == true — жёстко ограничиваем текущее окно только landscape.
+  override func application(
+    _ application: UIApplication,
+    supportedInterfaceOrientationsFor window: UIWindow?
+  ) -> UIInterfaceOrientationMask {
+    if forceLandscapeOnly {
+      return [.landscapeLeft, .landscapeRight]
+    }
+    return defaultOrientationMask()
+  }
+
+  private func defaultOrientationMask() -> UIInterfaceOrientationMask {
+    if UIDevice.current.userInterfaceIdiom == .pad {
+      return [.portrait, .portraitUpsideDown, .landscapeLeft, .landscapeRight]
+    }
+    return [.portrait, .landscapeLeft, .landscapeRight]
+  }
+
+  private func applyOrientationLock(_ locked: Bool) {
+    forceLandscapeOnly = locked
+
+    let targetMask: UIInterfaceOrientationMask =
+      locked ? [.landscapeLeft, .landscapeRight] : defaultOrientationMask()
+
+    if #available(iOS 16.0, *) {
+      if let scene = window?.windowScene {
+        scene.requestGeometryUpdate(.iOS(interfaceOrientations: targetMask)) { error in
+          print("Orientation requestGeometryUpdate error: \(error)")
+        }
+      }
+      window?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+    } else {
+      UIViewController.attemptRotationToDeviceOrientation()
+    }
+  }
+
   override func applicationDidBecomeActive(_ application: UIApplication) {
     // Старт AppsFlyer SDK (должен вызываться при каждом активировании)
     AppsFlyerLib.shared().start()
@@ -177,6 +228,24 @@ import AppsFlyerLib
       name: appsFlyerDeepLinkChannelName,
       binaryMessenger: controller.binaryMessenger
     )
+
+    // Канал per-screen лока ориентации (SimpleWebViewPage2)
+    orientationChannel = FlutterMethodChannel(
+      name: ChannelName.orientation,
+      binaryMessenger: controller.binaryMessenger
+    )
+    orientationChannel?.setMethodCallHandler { [weak self] call, result in
+      switch call.method {
+      case "lockLandscape":
+        self?.applyOrientationLock(true)
+        result(nil)
+      case "unlockLandscape":
+        self?.applyOrientationLock(false)
+        result(nil)
+      default:
+        result(FlutterMethodNotImplemented)
+      }
+    }
   }
   
   // MARK: - FCM token
