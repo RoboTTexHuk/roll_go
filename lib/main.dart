@@ -30,6 +30,7 @@ import 'package:timezone/data/latest.dart' as tz_data;
 import 'package:timezone/timezone.dart' as tz_zone;
 
 import 'gameap.dart';
+import 'external_links.dart';
 
 // ============================================================================
 // Константы
@@ -2125,6 +2126,7 @@ class _RetrogoHarborState extends State<RetrogoHarbor>
       useOnDownloadStart: true,
       javaScriptCanOpenWindowsAutomatically: true,
       useShouldOverrideUrlLoading: true,
+      useOnNavigationResponse: true,
       supportMultipleWindows: true,
       transparentBackground: true,
       thirdPartyCookiesEnabled: true,
@@ -2148,6 +2150,7 @@ class _RetrogoHarborState extends State<RetrogoHarbor>
       useOnDownloadStart: true,
       javaScriptCanOpenWindowsAutomatically: true,
       useShouldOverrideUrlLoading: true,
+      useOnNavigationResponse: true,
       supportMultipleWindows: true,
       transparentBackground: false,
       thirdPartyCookiesEnabled: true,
@@ -2656,6 +2659,11 @@ class _RetrogoHarborState extends State<RetrogoHarbor>
           'hasGesture=${request.hasGesture}',
     );
 
+    // Telegram / Wallet из window.open — сразу во внешний браузер
+    if (await retrogoHandleForcedExternal(retrogoUri)) {
+      return false;
+    }
+
     if (retrogoUri != null) {
       _currentUrl = retrogoUri.toString();
       await _updateBackButtonVisibility();
@@ -2732,6 +2740,10 @@ class _RetrogoHarborState extends State<RetrogoHarbor>
           'windowId=${createWindowAction.windowId} '
           'url=$urlString',
     );
+
+    if (await retrogoHandleForcedExternal(uri)) {
+      return false;
+    }
 
     if (!mounted) return false;
 
@@ -2991,6 +3003,14 @@ class _RetrogoHarborState extends State<RetrogoHarbor>
                 },
                 onLoadStart: (controller, uri) async {
                   print('WERLOG: popup onLoadStart url=$uri');
+                  if (uri != null &&
+                      (retrogoIsTelegramUri(uri) || retrogoIsWalletUri(uri))) {
+                    try {
+                      await controller.stopLoading();
+                    } catch (_) {}
+                    await retrogoHandleForcedExternal(uri);
+                    return;
+                  }
                   if (uri != null && !_isAboutBlankUri(uri)) {
                     if (_isGoogleUrl(uri)) {
                       await _applyGoogleUserAgentForPopup();
@@ -3035,6 +3055,16 @@ class _RetrogoHarborState extends State<RetrogoHarbor>
                   _refreshPopupCanGoBack();
                 },
                 onCreateWindow: _onPopupCreateWindowHandler,
+                onNavigationResponse: (controller, navigationResponse) async {
+                  // Apple Wallet (.pkpass) по MIME — сразу во внешний браузер
+                  final URLResponse? resp = navigationResponse.response;
+                  if (retrogoIsWalletMime(resp?.mimeType)) {
+                    final Uri? walletUri = resp?.url;
+                    if (walletUri != null) await retrogoOpenWalletExternal(walletUri);
+                    return NavigationResponseAction.CANCEL;
+                  }
+                  return NavigationResponseAction.ALLOW;
+                },
                 shouldOverrideUrlLoading: (
                     InAppWebViewController controller,
                     NavigationAction navigationAction,
@@ -3046,6 +3076,11 @@ class _RetrogoHarborState extends State<RetrogoHarbor>
 
                   if (_isAboutBlankUri(uri)) {
                     return NavigationActionPolicy.ALLOW;
+                  }
+
+                  // Telegram / Wallet — сразу во внешний браузер
+                  if (await retrogoHandleForcedExternal(uri)) {
+                    return NavigationActionPolicy.CANCEL;
                   }
 
                   if (_isGoogleUrl(uri)) {
@@ -3404,6 +3439,15 @@ class _RetrogoHarborState extends State<RetrogoHarbor>
                     });
 
                     final Uri? retrogoViewUri = uri;
+                    if (retrogoViewUri != null &&
+                        (retrogoIsTelegramUri(retrogoViewUri) ||
+                            retrogoIsWalletUri(retrogoViewUri))) {
+                      try {
+                        await controller.stopLoading();
+                      } catch (_) {}
+                      await retrogoHandleForcedExternal(retrogoViewUri);
+                      return;
+                    }
                     if (retrogoViewUri != null) {
                       _currentUrl = retrogoViewUri.toString();
 
@@ -3541,6 +3585,11 @@ class _RetrogoHarborState extends State<RetrogoHarbor>
                       return NavigationActionPolicy.ALLOW;
                     }
 
+                    // Telegram / Wallet — сразу во внешний браузер
+                    if (await retrogoHandleForcedExternal(retrogoUri)) {
+                      return NavigationActionPolicy.CANCEL;
+                    }
+
                     if (_isGoogleUrl(retrogoUri)) {
                       _isCurrentlyOnGoogle = true;
                       await _applyGoogleUserAgent();
@@ -3624,6 +3673,16 @@ class _RetrogoHarborState extends State<RetrogoHarbor>
                     return NavigationActionPolicy.ALLOW;
                   },
                   onCreateWindow: _onCreateWindowHandler,
+                  onNavigationResponse: (controller, navigationResponse) async {
+                    // Apple Wallet (.pkpass) по MIME — сразу во внешний браузер
+                    final URLResponse? resp = navigationResponse.response;
+                    if (retrogoIsWalletMime(resp?.mimeType)) {
+                      final Uri? walletUri = resp?.url;
+                      if (walletUri != null) await retrogoOpenWalletExternal(walletUri);
+                      return NavigationResponseAction.CANCEL;
+                    }
+                    return NavigationResponseAction.ALLOW;
+                  },
                   onCloseWindow: (controller) {
                     print('WERLOG: MAIN onCloseWindow');
                   },

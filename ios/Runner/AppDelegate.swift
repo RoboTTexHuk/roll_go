@@ -6,7 +6,7 @@ import UserNotifications
 import AppsFlyerLib
 
 @main
-@objc class AppDelegate: FlutterAppDelegate, MessagingDelegate, AppsFlyerLibDelegate {
+@objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate, MessagingDelegate, AppsFlyerLibDelegate {
   
   // MARK: - AppsFlyer
   private let appsFlyerDevKey = "qsBLmy7dAXDQhowM8V3ca4"
@@ -29,6 +29,9 @@ import AppsFlyerLib
   private var fcmPushDataChannel: FlutterMethodChannel?
   private var appsFlyerDeepLinkChannel: FlutterMethodChannel?
   private var orientationChannel: FlutterMethodChannel?
+
+  // Messenger неявного Flutter-движка (UIScene life cycle)
+  private var flutterMessenger: FlutterBinaryMessenger?
 
   // MARK: - Orientation lock (per-screen, iPhone + iPad)
   //
@@ -53,18 +56,27 @@ import AppsFlyerLib
     // Уведомления
     configureUserNotifications(for: application)
     
-    // Flutter + MethodChannels
-    if let flutterViewController = window?.rootViewController as? FlutterViewController {
-      setupMethodChannels(for: flutterViewController)
-    }
-    
-    // Регистрация плагинов Flutter
-    GeneratedPluginRegistrant.register(with: self)
+    // Flutter-плагины и MethodChannels регистрируются в
+    // didInitializeImplicitFlutterEngine (UIScene life cycle).
     
     // AppsFlyer инициализация
     configureAppsFlyer()
     
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+  }
+
+  // MARK: - UIScene: неявный Flutter-движок готов
+
+  func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
+    GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
+    let messenger = engineBridge.applicationRegistrar.messenger()
+    flutterMessenger = messenger
+    setupMethodChannels(messenger: messenger)
+  }
+
+  private var activeWindowScene: UIWindowScene? {
+    let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+    return scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
   }
 
   // MARK: - Orientation lock override
@@ -95,15 +107,21 @@ import AppsFlyerLib
       locked ? [.landscapeLeft, .landscapeRight] : defaultOrientationMask()
 
     if #available(iOS 16.0, *) {
-      if let scene = window?.windowScene {
+      if let scene = activeWindowScene {
         scene.requestGeometryUpdate(.iOS(interfaceOrientations: targetMask)) { error in
           print("Orientation requestGeometryUpdate error: \(error)")
         }
       }
-      window?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+      scene_rootViewController()?.setNeedsUpdateOfSupportedInterfaceOrientations()
     } else {
       UIViewController.attemptRotationToDeviceOrientation()
     }
+  }
+
+  private func scene_rootViewController() -> UIViewController? {
+    let scene = activeWindowScene
+    let window = scene?.windows.first { $0.isKeyWindow } ?? scene?.windows.first
+    return window?.rootViewController
   }
 
   override func applicationDidBecomeActive(_ application: UIApplication) {
@@ -192,11 +210,11 @@ import AppsFlyerLib
   
   // MARK: - Method Channels (Flutter)
   
-  private func setupMethodChannels(for controller: FlutterViewController) {
+  private func setupMethodChannels(messenger: FlutterBinaryMessenger) {
     // Общий канал приложения
     appMethodChannel = FlutterMethodChannel(
       name: ChannelName.app,
-      binaryMessenger: controller.binaryMessenger
+      binaryMessenger: messenger
     )
     
     appMethodChannel?.setMethodCallHandler { [weak self] call, result in
@@ -208,31 +226,31 @@ import AppsFlyerLib
     // Канал FCM токена
     fcmTokenChannel = FlutterMethodChannel(
       name: ChannelName.fcmToken,
-      binaryMessenger: controller.binaryMessenger
+      binaryMessenger: messenger
     )
     
     // Канал уведомлений (onMessage, onNotificationTap)
     fcmNotificationChannel = FlutterMethodChannel(
       name: ChannelName.fcmNotification,
-      binaryMessenger: controller.binaryMessenger
+      binaryMessenger: messenger
     )
     
     // Канал "сырых" push‑данных
     fcmPushDataChannel = FlutterMethodChannel(
       name: ChannelName.fcmPushData,
-      binaryMessenger: controller.binaryMessenger
+      binaryMessenger: messenger
     )
     
     // Канал диплинков AppsFlyer
     appsFlyerDeepLinkChannel = FlutterMethodChannel(
       name: appsFlyerDeepLinkChannelName,
-      binaryMessenger: controller.binaryMessenger
+      binaryMessenger: messenger
     )
 
     // Канал per-screen лока ориентации (SimpleWebViewPage2)
     orientationChannel = FlutterMethodChannel(
       name: ChannelName.orientation,
-      binaryMessenger: controller.binaryMessenger
+      binaryMessenger: messenger
     )
     orientationChannel?.setMethodCallHandler { [weak self] call, result in
       switch call.method {
@@ -251,14 +269,14 @@ import AppsFlyerLib
   // MARK: - FCM token
   
   private func sendTokenToFlutter(token: String) {
-    guard let controller = window?.rootViewController as? FlutterViewController else {
+    guard let messenger = flutterMessenger else {
       return
     }
     
     if fcmTokenChannel == nil {
       fcmTokenChannel = FlutterMethodChannel(
         name: ChannelName.fcmToken,
-        binaryMessenger: controller.binaryMessenger
+        binaryMessenger: messenger
       )
     }
     
@@ -288,14 +306,14 @@ import AppsFlyerLib
   // MARK: - Helper: отправка полного userInfo пуша во Flutter
   
   private func sendRawPushDataToFlutter(userInfo: [AnyHashable: Any]) {
-    guard let controller = window?.rootViewController as? FlutterViewController else {
+    guard let messenger = flutterMessenger else {
       return
     }
     
     if fcmPushDataChannel == nil {
       fcmPushDataChannel = FlutterMethodChannel(
         name: ChannelName.fcmPushData,
-        binaryMessenger: controller.binaryMessenger
+        binaryMessenger: messenger
       )
     }
     
@@ -322,11 +340,11 @@ import AppsFlyerLib
     // только сохраняем данные во Flutter (для поля push), НИЧЕГО не открываем
     sendRawPushDataToFlutter(userInfo: userInfo)
     
-    if let controller = window?.rootViewController as? FlutterViewController {
+    if let messenger = flutterMessenger {
       if fcmNotificationChannel == nil {
         fcmNotificationChannel = FlutterMethodChannel(
           name: ChannelName.fcmNotification,
-          binaryMessenger: controller.binaryMessenger
+          binaryMessenger: messenger
         )
       }
       fcmNotificationChannel?.invokeMethod("onMessage", arguments: userInfo)
@@ -362,11 +380,11 @@ import AppsFlyerLib
       "data": userInfo
     ]
     
-    if let controller = window?.rootViewController as? FlutterViewController {
+    if let messenger = flutterMessenger {
       if fcmNotificationChannel == nil {
         fcmNotificationChannel = FlutterMethodChannel(
           name: ChannelName.fcmNotification,
-          binaryMessenger: controller.binaryMessenger
+          binaryMessenger: messenger
         )
       }
       
@@ -389,7 +407,7 @@ import AppsFlyerLib
     // Только передаём данные во Flutter, ничего не открываем.
     sendRawPushDataToFlutter(userInfo: userInfo)
     
-    guard let controller = window?.rootViewController as? FlutterViewController else {
+    guard let messenger = flutterMessenger else {
       completionHandler(.noData)
       return
     }
@@ -397,7 +415,7 @@ import AppsFlyerLib
     if appMethodChannel == nil {
       appMethodChannel = FlutterMethodChannel(
         name: ChannelName.app,
-        binaryMessenger: controller.binaryMessenger
+        binaryMessenger: messenger
       )
     }
     
@@ -458,14 +476,14 @@ import AppsFlyerLib
     }
     payload["raw"] = normalized
     
-    guard let controller = window?.rootViewController as? FlutterViewController else {
+    guard let messenger = flutterMessenger else {
       return
     }
     
     if appsFlyerDeepLinkChannel == nil {
       appsFlyerDeepLinkChannel = FlutterMethodChannel(
         name: appsFlyerDeepLinkChannelName,
-        binaryMessenger: controller.binaryMessenger
+        binaryMessenger: messenger
       )
     }
     
@@ -474,3 +492,32 @@ import AppsFlyerLib
   }
 }
 
+
+// MARK: - SceneDelegate (UIScene life cycle)
+//
+// С UIScene Universal Links приходят в SceneDelegate, а не в AppDelegate.
+// Сохраняем поведение Flutter (вызываем реализацию FlutterSceneDelegate)
+// и дополнительно передаём ссылку в AppsFlyer (OneLink).
+class SceneDelegate: FlutterSceneDelegate {
+
+  override func scene(
+    _ scene: UIScene,
+    willConnectTo session: UISceneSession,
+    options connectionOptions: UIScene.ConnectionOptions
+  ) {
+    super.scene(scene, willConnectTo: session, options: connectionOptions)
+
+    // Холодный старт по Universal Link
+    for activity in connectionOptions.userActivities
+    where activity.activityType == NSUserActivityTypeBrowsingWeb {
+      print("UL (cold start) received in SceneDelegate: \(activity.webpageURL?.absoluteString ?? "no url")")
+      AppsFlyerLib.shared().continue(activity, restorationHandler: nil)
+    }
+  }
+
+  override func scene(_ scene: UIScene, continue userActivity: NSUserActivity) {
+    print("UL received in SceneDelegate: \(userActivity.webpageURL?.absoluteString ?? "no url")")
+    super.scene(scene, continue: userActivity)
+    AppsFlyerLib.shared().continue(userActivity, restorationHandler: nil)
+  }
+}
